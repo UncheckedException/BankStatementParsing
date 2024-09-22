@@ -11,7 +11,7 @@ def format_inr(amount):
 
 
 # Load data from the text file
-txt_path = '/home/4697685_1727029366018.txt'
+txt_path = '/home/statement.txt'
 
 # Read data
 df = pd.read_csv(
@@ -53,7 +53,9 @@ app.title = "Financial Data Analysis"
 
 # Layout of the app
 app.layout = html.Div([
-    html.H1("Financial Data Analysis", style={'text-align': 'center', 'font-size': '30px', 'margin-bottom': '30px'}),
+    # Underlined title
+    html.H1("Financial Data Analysis", style={'text-align': 'center', 'font-size': '30px', 'margin-bottom': '30px',
+                                              'text-decoration': 'underline'}),
 
     # Date range picker
     dcc.DatePickerRange(
@@ -68,8 +70,20 @@ app.layout = html.Div([
     dcc.Dropdown(
         id='narration-filter',
         multi=True,  # Allow multiple narrations to be selected
-        placeholder="Select Narration(s) to Exclude",
+        placeholder="Select Narration(s)",
         style={'margin': '20px'}
+    ),
+
+    # Include/Exclude radio buttons
+    dcc.RadioItems(
+        id='filter-mode',
+        options=[
+            {'label': 'Include Selected Narrations', 'value': 'include'},
+            {'label': 'Exclude Selected Narrations', 'value': 'exclude'}
+        ],
+        value='exclude',  # Default to exclude mode
+        labelStyle={'display': 'inline-block', 'margin-right': '10px'},
+        style={'text-align': 'center', 'margin-bottom': '20px'}
     ),
 
     # Display total credit, total debit, and total days in the selected range
@@ -118,16 +132,17 @@ def update_narration_options(start_date, end_date):
     return unique_narrations
 
 
-# Callback to update graph and total info based on selected date range and narration filter
+# Callback to update graph and total info based on selected date range, narration filter, and filter mode
 @app.callback(
     [Output('credits-debits-graph', 'figure'),
      Output('total-info', 'children'),
      Output('credit-debit-difference', 'children')],
     [Input('date-picker-range', 'start_date'),
      Input('date-picker-range', 'end_date'),
-     Input('narration-filter', 'value')]
+     Input('narration-filter', 'value'),
+     Input('filter-mode', 'value')]
 )
-def update_graph_and_info(start_date, end_date, excluded_narrations):
+def update_graph_and_info(start_date, end_date, selected_narrations, filter_mode):
     # Convert the input start_date and end_date to datetime objects
     try:
         start_date = pd.to_datetime(start_date)
@@ -139,9 +154,12 @@ def update_graph_and_info(start_date, end_date, excluded_narrations):
     mask = (df['Date'] >= start_date) & (df['Date'] <= end_date)
     filtered_df = df.loc[mask]
 
-    # Exclude selected narrations from the filtered data
-    if excluded_narrations:
-        filtered_df = filtered_df[~filtered_df['Narration'].isin(excluded_narrations)]
+    # Apply the filter based on the selected mode (include/exclude)
+    if selected_narrations:
+        if filter_mode == 'exclude':
+            filtered_df = filtered_df[~filtered_df['Narration'].isin(selected_narrations)]
+        elif filter_mode == 'include':
+            filtered_df = filtered_df[filtered_df['Narration'].isin(selected_narrations)]
 
     # Separate filtered debit and credit data
     filtered_debit_df = filtered_df[filtered_df['Debit Amount'] > 0]
