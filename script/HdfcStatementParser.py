@@ -2,7 +2,7 @@ import os
 import pandas as pd
 import dash
 from dash import dcc, html
-from dash.dependencies import Input, Output
+from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
 import re
 
@@ -43,15 +43,14 @@ for filename in os.listdir(directory_path):
         )
 
         # Remove leading and trailing spaces from all fields in the DataFrame
-        temp_df = temp_df.map(lambda x: x.strip() if isinstance(x, str) else x)
+        temp_df = temp_df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
 
         # Convert 'Date' column to datetime format, handle parsing errors
         temp_df['Date'] = pd.to_datetime(temp_df['Date'], format='%d/%m/%y', errors='coerce')
 
         # Convert 'Debit Amount' and 'Credit Amount' to numeric, handling errors
         temp_df['Debit Amount'] = pd.to_numeric(temp_df['Debit Amount'].str.replace(',', ''), errors='coerce').fillna(0)
-        temp_df['Credit Amount'] = pd.to_numeric(temp_df['Credit Amount'].str.replace(',', ''), errors='coerce').fillna(
-            0)
+        temp_df['Credit Amount'] = pd.to_numeric(temp_df['Credit Amount'].str.replace(',', ''), errors='coerce').fillna(0)
 
         # Remove redundant transactions: Keep only rows where either debit or credit is non-zero
         temp_df = temp_df[(temp_df['Debit Amount'] > 0) & (temp_df['Credit Amount'] == 0) |
@@ -62,7 +61,6 @@ for filename in os.listdir(directory_path):
 
 # Combine all DataFrames into a single DataFrame
 df = pd.concat(df_list, ignore_index=True)
-
 
 # Function to extract generalized narration patterns
 def get_generalized_narration(narration):
@@ -89,7 +87,6 @@ app.title = "Financial Data Analysis"
 
 # Layout of the app
 app.layout = html.Div([
-    # Underlined title
     html.H1("Financial Data Analysis", style={'text-align': 'center', 'font-size': '30px', 'margin-bottom': '30px',
                                               'text-decoration': 'underline'}),
 
@@ -102,13 +99,41 @@ app.layout = html.Div([
         style={'margin': '20px'}
     ),
 
+    # Toggle button for narration filter
+    html.Button(
+        'Toggle Narration Filter',
+        id='toggle-button',
+        n_clicks=0,
+        style={'margin': '10px'}
+    ),
+
     # Narration filter dropdown (uses Generalized Narration for options)
     dcc.Dropdown(
-        id='narration-filter',
-        multi=True,  # Allow multiple narrations to be selected
+        id='narration-dropdown',
+        multi=True,  # Allow multiple selections
         placeholder="Select Narration(s)",
         style={'margin': '20px', 'max-height': '400px', 'width': '50%'},
-        options=[],  # Will be populated dynamically
+        options=[],
+    ),
+
+    # Collapsible checklist for bulk selection
+    html.Div(
+        id='narration-checklist-container',
+        style={'display': 'none', 'margin': '20px', 'width': '50%'},
+        children=[
+            # Search bar for checklist
+            dcc.Input(
+                id='checklist-search',
+                type='text',
+                placeholder='Search Narration...',
+                style={'width': '100%', 'margin-bottom': '10px'}
+            ),
+            dcc.Checklist(
+                id='narration-checklist',
+                style={'overflowY': 'scroll', 'maxHeight': '300px'},
+                options=[]
+            )
+        ]
     ),
 
     # Include/Exclude radio buttons
@@ -118,7 +143,7 @@ app.layout = html.Div([
             {'label': 'Include Selected Narrations', 'value': 'include'},
             {'label': 'Exclude Selected Narrations', 'value': 'exclude'}
         ],
-        value='exclude',  # Default to exclude mode
+        value='exclude',
         labelStyle={'display': 'inline-block', 'margin-right': '10px'},
         style={'text-align': 'center', 'margin-bottom': '20px'}
     ),
@@ -146,19 +171,21 @@ def get_debit_color(amount):
         return 'blue'  # Default color for debits <= 1000
 
 
-# Callback to update narration filter options based on selected date range
+# Callback to update narration filter options based on selected date range and search input
 @app.callback(
-    Output('narration-filter', 'options'),
+    [Output('narration-dropdown', 'options'),
+     Output('narration-checklist', 'options')],
     [Input('date-picker-range', 'start_date'),
-     Input('date-picker-range', 'end_date')]
+     Input('date-picker-range', 'end_date'),
+     Input('checklist-search', 'value')]
 )
-def update_narration_options(start_date, end_date):
+def update_narration_options(start_date, end_date, search_value):
     # Convert the input start_date and end_date to datetime objects
     try:
         start_date = pd.to_datetime(start_date)
         end_date = pd.to_datetime(end_date)
     except Exception as e:
-        return []  # Return empty list if date conversion fails
+        return [], []  # Return empty list if date conversion fails
 
     # Filter the data based on the selected date range
     mask = (df['Date'] >= start_date) & (df['Date'] <= end_date)
@@ -167,7 +194,28 @@ def update_narration_options(start_date, end_date):
     # Get unique generalized narrations for the filtered date range
     unique_narrations = [{'label': narration, 'value': narration} for narration in
                          filtered_df['Generalized Narration'].unique()]
-    return unique_narrations
+
+    # Filter options based on search input if provided
+    if search_value:
+        unique_narrations = [option for option in unique_narrations if search_value.lower() in option['label'].lower()]
+
+    return unique_narrations, unique_narrations
+
+
+# Combined callback to handle toggle actions
+@app.callback(
+    [Output('narration-dropdown', 'style'),
+     Output('narration-checklist-container', 'style')],
+    [Input('toggle-button', 'n_clicks')],
+    [State('narration-dropdown', 'value')]
+)
+def toggle_narration_filter(n_clicks, dropdown_value):
+    if n_clicks % 2 == 1:
+        # Show checklist, hide dropdown
+        return {'display': 'none'}, {'display': 'block'}
+    else:
+        # Show dropdown, hide checklist
+        return {'display': 'block'}, {'display': 'none'}
 
 
 # Callback to update graph and total info based on selected date range, narration filter, and filter mode
@@ -177,10 +225,14 @@ def update_narration_options(start_date, end_date):
      Output('credit-debit-difference', 'children')],
     [Input('date-picker-range', 'start_date'),
      Input('date-picker-range', 'end_date'),
-     Input('narration-filter', 'value'),
+     Input('narration-dropdown', 'value'),
+     Input('narration-checklist', 'value'),
      Input('filter-mode', 'value')]
 )
-def update_graph_and_info(start_date, end_date, selected_narrations, filter_mode):
+def update_graph_and_info(start_date, end_date, dropdown_value, checklist_value, filter_mode):
+    # Determine the effective narration selection based on whether checklist or dropdown is visible
+    selected_narrations = checklist_value if checklist_value else dropdown_value
+
     # Convert the input start_date and end_date to datetime objects
     try:
         start_date = pd.to_datetime(start_date)
