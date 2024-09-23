@@ -1,51 +1,76 @@
+import os
 import pandas as pd
 import dash
 from dash import dcc, html
 from dash.dependencies import Input, Output
 import plotly.graph_objects as go
-
+import re
 
 # Function to format amounts in Indian Rupee format
 def format_inr(amount):
     return "{:,.2f}".format(amount)
 
+# Directory containing the text files
+directory_path = '/home/codeplay/PycharmProjects/StamentAnalysis/data/hdfc'
 
-# Load data from the text file
-txt_path = '/home/statement.txt'
+# Initialize an empty DataFrame to hold all data
+df_list = []
 
-# Read data
-df = pd.read_csv(
-    txt_path,
-    delimiter=',',
-    skipinitialspace=True,
-    names=[
-        'Date', 'Narration', 'Value Date', 'Debit Amount',
-        'Credit Amount', 'Chq/Ref Number', 'Closing Balance'
-    ],
-    header=0,
-    dtype={
-        'Date': str,
-        'Narration': str,
-        'Value Date': str,
-        'Debit Amount': str,
-        'Credit Amount': str,
-        'Chq/Ref Number': str,
-        'Closing Balance': str
-    }
-)
+# Loop through all text files in the directory and read them into DataFrames
+for filename in os.listdir(directory_path):
+    if filename.endswith(".txt"):
+        file_path = os.path.join(directory_path, filename)
+        temp_df = pd.read_csv(
+            file_path,
+            delimiter=',',
+            skipinitialspace=True,
+            names=[
+                'Date', 'Narration', 'Value Date', 'Debit Amount',
+                'Credit Amount', 'Chq/Ref Number', 'Closing Balance'
+            ],
+            header=0,
+            dtype={
+                'Date': str,
+                'Narration': str,
+                'Value Date': str,
+                'Debit Amount': str,
+                'Credit Amount': str,
+                'Chq/Ref Number': str,
+                'Closing Balance': str
+            }
+        )
 
-# Remove leading and trailing spaces from all fields in the DataFrame
-df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        # Remove leading and trailing spaces from all fields in the DataFrame
+        temp_df = temp_df.map(lambda x: x.strip() if isinstance(x, str) else x)
 
-# Convert 'Date' column to datetime format, handle parsing errors
-df['Date'] = pd.to_datetime(df['Date'], format='%d/%m/%y', errors='coerce')
+        # Convert 'Date' column to datetime format, handle parsing errors
+        temp_df['Date'] = pd.to_datetime(temp_df['Date'], format='%d/%m/%y', errors='coerce')
 
-# Convert 'Debit Amount' and 'Credit Amount' to numeric, handling errors
-df['Debit Amount'] = pd.to_numeric(df['Debit Amount'].str.replace(',', ''), errors='coerce').fillna(0)
-df['Credit Amount'] = pd.to_numeric(df['Credit Amount'].str.replace(',', ''), errors='coerce').fillna(0)
+        # Convert 'Debit Amount' and 'Credit Amount' to numeric, handling errors
+        temp_df['Debit Amount'] = pd.to_numeric(temp_df['Debit Amount'].str.replace(',', ''), errors='coerce').fillna(0)
+        temp_df['Credit Amount'] = pd.to_numeric(temp_df['Credit Amount'].str.replace(',', ''), errors='coerce').fillna(0)
 
-# Remove redundant transactions: Keep only rows where either debit or credit is non-zero
-df = df[(df['Debit Amount'] > 0) & (df['Credit Amount'] == 0) | (df['Credit Amount'] > 0) & (df['Debit Amount'] == 0)]
+        # Remove redundant transactions: Keep only rows where either debit or credit is non-zero
+        temp_df = temp_df[(temp_df['Debit Amount'] > 0) & (temp_df['Credit Amount'] == 0) |
+                          (temp_df['Credit Amount'] > 0) & (temp_df['Debit Amount'] == 0)]
+
+        # Append the temporary DataFrame to the list
+        df_list.append(temp_df)
+
+# Combine all DataFrames into a single DataFrame
+df = pd.concat(df_list, ignore_index=True)
+
+# Function to extract generalized narration patterns
+def get_generalized_narration(narration):
+    # Check if the narration starts with 'UPI-' and ignore everything after '@'
+    match = re.match(r'UPI-[^@]+', narration)
+    if match:
+        return match.group()
+    # Add more patterns as needed here, for now return the original narration
+    return narration
+
+# Create a new column in the DataFrame for generalized narration patterns (for filtering only)
+df['Generalized Narration'] = df['Narration'].apply(get_generalized_narration)
 
 # Initialize Dash app
 app = dash.Dash(__name__)
@@ -66,7 +91,7 @@ app.layout = html.Div([
         style={'margin': '20px'}
     ),
 
-    # Narration filter dropdown
+    # Narration filter dropdown (uses Generalized Narration for options)
     dcc.Dropdown(
         id='narration-filter',
         multi=True,  # Allow multiple narrations to be selected
@@ -127,8 +152,8 @@ def update_narration_options(start_date, end_date):
     mask = (df['Date'] >= start_date) & (df['Date'] <= end_date)
     filtered_df = df.loc[mask]
 
-    # Get unique narrations for the filtered date range
-    unique_narrations = [{'label': narration, 'value': narration} for narration in filtered_df['Narration'].unique()]
+    # Get unique generalized narrations for the filtered date range
+    unique_narrations = [{'label': narration, 'value': narration} for narration in filtered_df['Generalized Narration'].unique()]
     return unique_narrations
 
 
@@ -157,9 +182,11 @@ def update_graph_and_info(start_date, end_date, selected_narrations, filter_mode
     # Apply the filter based on the selected mode (include/exclude)
     if selected_narrations:
         if filter_mode == 'exclude':
-            filtered_df = filtered_df[~filtered_df['Narration'].isin(selected_narrations)]
+            # Exclude based on the generalized narration pattern
+            filtered_df = filtered_df[~filtered_df['Generalized Narration'].isin(selected_narrations)]
         elif filter_mode == 'include':
-            filtered_df = filtered_df[filtered_df['Narration'].isin(selected_narrations)]
+            # Include based on the generalized narration pattern
+            filtered_df = filtered_df[filtered_df['Generalized Narration'].isin(selected_narrations)]
 
     # Separate filtered debit and credit data
     filtered_debit_df = filtered_df[filtered_df['Debit Amount'] > 0]
