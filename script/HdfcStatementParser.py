@@ -50,7 +50,8 @@ for filename in os.listdir(directory_path):
 
         # Convert 'Debit Amount' and 'Credit Amount' to numeric, handling errors
         temp_df['Debit Amount'] = pd.to_numeric(temp_df['Debit Amount'].str.replace(',', ''), errors='coerce').fillna(0)
-        temp_df['Credit Amount'] = pd.to_numeric(temp_df['Credit Amount'].str.replace(',', ''), errors='coerce').fillna(0)
+        temp_df['Credit Amount'] = pd.to_numeric(temp_df['Credit Amount'].str.replace(',', ''), errors='coerce').fillna(
+            0)
 
         # Remove redundant transactions: Keep only rows where either debit or credit is non-zero
         temp_df = temp_df[(temp_df['Debit Amount'] > 0) & (temp_df['Credit Amount'] == 0) |
@@ -61,6 +62,7 @@ for filename in os.listdir(directory_path):
 
 # Combine all DataFrames into a single DataFrame
 df = pd.concat(df_list, ignore_index=True)
+
 
 # Function to extract generalized narration patterns
 def get_generalized_narration(narration):
@@ -119,7 +121,7 @@ app.layout = html.Div([
     # Collapsible checklist for bulk selection
     html.Div(
         id='narration-checklist-container',
-        style={'display': 'none', 'margin': '20px', 'width': '50%'},
+        style={'display': 'none', 'margin': '20px', 'width': '50%'},  # Keep the width unchanged
         children=[
             # Search bar for checklist
             dcc.Input(
@@ -128,13 +130,26 @@ app.layout = html.Div([
                 placeholder='Search Narration...',
                 style={'width': '100%', 'margin-bottom': '10px'}
             ),
+            html.Div(
+                id='select-clear-buttons',
+                style={'display': 'none', 'margin-bottom': '10px'},
+                children=[
+                    html.Button('Select All', id='select-all-button', n_clicks=0, style={'margin-right': '10px'}),
+                    html.Button('Clear All', id='clear-all-button', n_clicks=0)
+                ]
+            ),
             dcc.Checklist(
                 id='narration-checklist',
-                style={'overflowY': 'scroll', 'maxHeight': '300px'},
+                style={
+                    'overflowY': 'scroll',
+                    'maxHeight': '180px',  # Adjust the height here to 60% of 300px (original height)
+                    'width': '100%'
+                },
                 options=[]
             )
         ]
-    ),
+    )
+    ,
 
     # Include/Exclude radio buttons
     dcc.RadioItems(
@@ -174,7 +189,8 @@ def get_debit_color(amount):
 # Callback to update narration filter options based on selected date range and search input
 @app.callback(
     [Output('narration-dropdown', 'options'),
-     Output('narration-checklist', 'options')],
+     Output('narration-checklist', 'options'),
+     Output('select-clear-buttons', 'style')],
     [Input('date-picker-range', 'start_date'),
      Input('date-picker-range', 'end_date'),
      Input('checklist-search', 'value')]
@@ -185,7 +201,7 @@ def update_narration_options(start_date, end_date, search_value):
         start_date = pd.to_datetime(start_date)
         end_date = pd.to_datetime(end_date)
     except Exception as e:
-        return [], []  # Return empty list if date conversion fails
+        return [], [], {'display': 'none'}  # Return empty list and hide buttons if date conversion fails
 
     # Filter the data based on the selected date range
     mask = (df['Date'] >= start_date) & (df['Date'] <= end_date)
@@ -197,25 +213,54 @@ def update_narration_options(start_date, end_date, search_value):
 
     # Filter options based on search input if provided
     if search_value:
-        unique_narrations = [option for option in unique_narrations if search_value.lower() in option['label'].lower()]
+        filtered_options = [option for option in unique_narrations if search_value.lower() in option['label'].lower()]
+        # Show select/clear buttons if search results are available
+        buttons_style = {'display': 'block'} if filtered_options else {'display': 'none'}
+        return unique_narrations, filtered_options, buttons_style
 
-    return unique_narrations, unique_narrations
+    return unique_narrations, unique_narrations, {'display': 'none'}
 
 
-# Combined callback to handle toggle actions
+# Combined callback to handle toggle and search actions
 @app.callback(
     [Output('narration-dropdown', 'style'),
-     Output('narration-checklist-container', 'style')],
-    [Input('toggle-button', 'n_clicks')],
-    [State('narration-dropdown', 'value')]
+     Output('narration-checklist-container', 'style'),
+     Output('narration-checklist', 'value')],
+    [Input('toggle-button', 'n_clicks'),
+     Input('select-all-button', 'n_clicks'),
+     Input('clear-all-button', 'n_clicks')],
+    [State('narration-dropdown', 'value'),
+     State('narration-checklist', 'options')]
 )
-def toggle_narration_filter(n_clicks, dropdown_value):
-    if n_clicks % 2 == 1:
-        # Show checklist, hide dropdown
-        return {'display': 'none'}, {'display': 'block'}
-    else:
-        # Show dropdown, hide checklist
-        return {'display': 'block'}, {'display': 'none'}
+def toggle_select_clear(n_clicks_toggle, n_clicks_select_all, n_clicks_clear_all, dropdown_value, checklist_options):
+    ctx = dash.callback_context
+
+    # Determine which input triggered the callback
+    if not ctx.triggered:
+        return {'display': 'block'}, {'display': 'none'}, []
+
+    # Toggle logic
+    if ctx.triggered[0]['prop_id'] == 'toggle-button.n_clicks':
+        if n_clicks_toggle % 2 == 1:
+            # Show checklist, hide dropdown
+            return {'display': 'none'}, {'display': 'block'}, dropdown_value or []
+        else:
+            # Show dropdown, hide checklist
+            return {'display': 'block'}, {'display': 'none'}, []
+
+    # Select All logic
+    if ctx.triggered[0]['prop_id'] == 'select-all-button.n_clicks':
+        if n_clicks_select_all > 0:
+            # Select all values if the button is clicked
+            return dash.no_update, dash.no_update, [option['value'] for option in checklist_options]
+
+    # Clear All logic
+    if ctx.triggered[0]['prop_id'] == 'clear-all-button.n_clicks':
+        if n_clicks_clear_all > 0:
+            # Clear all selected values
+            return dash.no_update, dash.no_update, []
+
+    return {'display': 'block'}, {'display': 'none'}, []
 
 
 # Callback to update graph and total info based on selected date range, narration filter, and filter mode
