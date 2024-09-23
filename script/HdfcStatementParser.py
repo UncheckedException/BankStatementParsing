@@ -6,9 +6,11 @@ from dash.dependencies import Input, Output
 import plotly.graph_objects as go
 import re
 
+
 # Function to format amounts in Indian Rupee format
 def format_inr(amount):
     return "{:,.2f}".format(amount)
+
 
 # Directory containing the text files
 directory_path = '/home/codeplay/PycharmProjects/StamentAnalysis/data/hdfc'
@@ -48,7 +50,8 @@ for filename in os.listdir(directory_path):
 
         # Convert 'Debit Amount' and 'Credit Amount' to numeric, handling errors
         temp_df['Debit Amount'] = pd.to_numeric(temp_df['Debit Amount'].str.replace(',', ''), errors='coerce').fillna(0)
-        temp_df['Credit Amount'] = pd.to_numeric(temp_df['Credit Amount'].str.replace(',', ''), errors='coerce').fillna(0)
+        temp_df['Credit Amount'] = pd.to_numeric(temp_df['Credit Amount'].str.replace(',', ''), errors='coerce').fillna(
+            0)
 
         # Remove redundant transactions: Keep only rows where either debit or credit is non-zero
         temp_df = temp_df[(temp_df['Debit Amount'] > 0) & (temp_df['Credit Amount'] == 0) |
@@ -60,14 +63,22 @@ for filename in os.listdir(directory_path):
 # Combine all DataFrames into a single DataFrame
 df = pd.concat(df_list, ignore_index=True)
 
+
 # Function to extract generalized narration patterns
 def get_generalized_narration(narration):
-    # Check if the narration starts with 'UPI-' and ignore everything after '@'
+    # Group narrations starting with 'UPI-'
     match = re.match(r'UPI-[^@]+', narration)
     if match:
         return match.group()
+
+    # Group narrations starting with 'ACH D- INDIAN CLEARING CORP-' and remove the part after the last hyphen
+    match = re.match(r'(ACH D- INDIAN CLEARING CORP)-[^-]+', narration)
+    if match:
+        return match.group(1)  # Return only the general part before the last hyphen
+
     # Add more patterns as needed here, for now return the original narration
     return narration
+
 
 # Create a new column in the DataFrame for generalized narration patterns (for filtering only)
 df['Generalized Narration'] = df['Narration'].apply(get_generalized_narration)
@@ -96,7 +107,8 @@ app.layout = html.Div([
         id='narration-filter',
         multi=True,  # Allow multiple narrations to be selected
         placeholder="Select Narration(s)",
-        style={'margin': '20px'}
+        style={'margin': '20px', 'max-height': '400px', 'width': '50%'},
+        options=[],  # Will be populated dynamically
     ),
 
     # Include/Exclude radio buttons
@@ -153,7 +165,8 @@ def update_narration_options(start_date, end_date):
     filtered_df = df.loc[mask]
 
     # Get unique generalized narrations for the filtered date range
-    unique_narrations = [{'label': narration, 'value': narration} for narration in filtered_df['Generalized Narration'].unique()]
+    unique_narrations = [{'label': narration, 'value': narration} for narration in
+                         filtered_df['Generalized Narration'].unique()]
     return unique_narrations
 
 
