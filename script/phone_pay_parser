@@ -1,0 +1,328 @@
+import os
+import re
+from datetime import datetime
+from typing import Dict, Any
+from typing import List
+
+import pdfplumber
+from datetime import datetime
+from sqlalchemy import Table, DateTime, Column, String, Double, Text, BigInteger, func, create_engine, MetaData
+from app.core.config_loader import load_pdf_passwords, load_paths_config
+
+
+engine = create_engine("mysql+pymysql://root:mysql@localhost:3306/transactions")
+metadata = MetaData()
+
+phone_pay_transactions = Table(
+    "phone_pay_transactions",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("txn_datetime", DateTime, nullable=False),
+    Column("transaction_details", Text),
+    Column("txn_type", String(10)),
+    Column("amount", Double, nullable=False, default=0),
+    Column("created_at", DateTime, server_default=func.now())
+)
+
+
+EXPECTED_COLUMNS = ['Date', 'Transaction Details', 'Type', 'Amount']
+
+HEADER_PATTERN = re.compile(
+    r"^Transaction Statement for \+\d{10,15}$|"
+    r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}\s*-\s*"
+    r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}$"
+)
+
+FOOTER_PATTERN = re.compile(
+    r"^Page\s+\d+\s+of\s+\d+$|"
+    r"system generated statement|support\.phonepe\.com/statement",
+    re.IGNORECASE
+)
+
+DATE_PATTERN = re.compile(
+    r'^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},(?:\s*\d{4})?$'
+)
+
+
+DATE_FORMATS = [
+    "%b %d, %Y %I:%M %p",   # Aug 31, 2025 08:31 PM
+    "%b %d, %Y"             # Jul 01, 2020
+]
+
+def parse_date(date_str: str) -> datetime:
+    """Parse date into a Python datetime using multiple formats."""
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(date_str.strip(), fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Unrecognized date format: {date_str}")
+
+
+def sanitize_amount(amount_str: str) -> float:
+    """
+    Convert things like: "INR 2,000.00", "2,000.00", " 2000 " into float: 2000.00
+    """
+    if not amount_str:
+        return 0.0
+
+    cleaned = re.sub(r"[^\d.\-]", "", amount_str)
+    return float(cleaned)
+
+
+def is_date_row(value: str) -> bool:
+    return bool(DATE_PATTERN.match(value.strip()))
+
+
+def is_header_or_footer(text: str) -> bool:
+    text = text.strip()
+    if HEADER_PATTERN.search(text):
+        return True
+    if FOOTER_PATTERN.search(text):
+        return True
+    return False
+
+def is_probable_header(row_texts: List[str],
+                       expected_headers=EXPECTED_COLUMNS,
+                       threshold: float = 0.8) -> bool:
+    if not row_texts:
+        return False
+
+    normalized_row = " ".join(row_texts).lower()
+
+    match_count = 0
+    for header in expected_headers:
+        if header.lower() in normalized_row:
+            match_count += 1
+
+    score = match_count / len(expected_headers)
+    return score >= threshold
+
+
+def extract_dynamic_column_map(page):
+    words = page.extract_words(use_text_flow=True)
+    words = sorted(words, key=lambda w: (w["doctop"], w["x0"]))
+
+    header_top = min(w["top"] for w in words)
+    header_words = [w for w in words if abs(w["top"] - header_top) < 5]
+
+    column_map = {}
+
+    for w in header_words:
+        col_name = w["text"].strip().lower().replace(" ", "_")
+        column_map[col_name] = w["x0"]
+    return column_map
+
+
+def separate_columns_from_row(row_words: List[Dict[str, Any]],
+                                intra_word_tolerance: float = 5.0,
+                                column_break_tolerance: float = 20.0) -> List[Dict[str, Any]]:
+    if not row_words:
+        return []
+
+    row_words.sort(key=lambda w: w["x0"])
+
+    merged_texts = []
+
+    current_text = row_words[0]['text']
+    current_x0 = row_words[0]['x0']
+    current_x1 = row_words[0]['x1']
+    current_doctop = row_words[0]['doctop']
+
+    for i in range(1, len(row_words)):
+        prev_word = row_words[i - 1]
+        current_word = row_words[i]
+
+        gap = current_word['x0'] - prev_word['x1']
+
+        # 1. Column break
+        if gap >= column_break_tolerance:
+            merged_texts.append({
+                'text': current_text,
+                'x0': current_x0,
+                'x1': current_x1,
+                'doctop': current_doctop,
+            })
+
+            # Start a new merged text block (the next column)
+            current_text = current_word['text']
+            current_x0 = current_word['x0']
+            current_x1 = current_word['x1']
+
+        # 2. Intra-word space or inconsistent spacing (merge with space)
+        else:
+            current_text += " " + current_word['text']
+            current_x1 = current_word['x1']
+
+    # Add the last merged text block (column)
+    merged_texts.append({
+        'text': current_text,
+        'x0': current_x0,
+        'x1': current_x1,
+        'doctop': current_doctop
+    })
+
+    return merged_texts
+
+def group_words_by_row(page) -> List[List[Dict[str, Any]]]:
+    raw_words = page.extract_words(x_tolerance=3, y_tolerance=3)
+    raw_words.sort(key=lambda w: (w["doctop"], w["x0"]))
+    rows = []
+    current_row = []
+    ROW_TOLERANCE = 1.0
+
+    for word in raw_words:
+        if len(current_row) == 0:
+            current_row.append(word)
+        else:
+            last_word_doctop = current_row[-1]["doctop"]
+            if abs(word["doctop"] - last_word_doctop) <= ROW_TOLERANCE:
+                current_row.append(word)
+            else:
+                rows.append(current_row)
+                current_row = [word]
+    if current_row:
+        rows.append(current_row)
+
+    return rows
+
+def extract_header_column_position(merged_blocks) -> dict:
+    col_map = {}
+    for block in merged_blocks:
+        key = block["text"].strip().lower().replace(" ", "_")
+        col_map[key] = block["x0"]
+    return col_map
+
+
+def assign_block_to_column(block, column_map, max_tolerance=20):
+    x0 = block["x0"]
+    distances = {col: abs(x0 - header_x) for col, header_x in column_map.items()}
+    best_col = min(distances, key=distances.get)
+    if distances[best_col] > max_tolerance:
+        return None, block["text"]
+    return best_col, block["text"]
+
+
+def map_row_to_columns(merged_blocks, column_map):
+    row_dict = {col: "" for col in column_map.keys()}
+
+    for block in merged_blocks:
+        col, text = assign_block_to_column(block, column_map)
+        if col:
+            # Append text if multiple blocks map to same column
+            row_dict[col] = (row_dict[col] + " " + text).strip()
+
+    return row_dict
+
+
+def sanitize_transaction(txn: dict) -> dict:
+    """Convert parsed PDF row into a DB insertable record."""
+    return {
+        "txn_datetime": parse_date(txn["date"]),
+        "transaction_details": txn["transaction_details"].strip(),
+        "txn_type": txn["type"].strip(),
+        "amount": sanitize_amount(txn["amount"])
+    }
+
+
+def insert_transactions(engine, table: Table, transactions: list[dict]):
+    """Sanitize and insert each transaction one-by-one using SQLAlchemy Core."""
+
+    with engine.begin() as conn:
+        for t in transactions:
+            print("Transaction: ", t)
+            sanitized = sanitize_transaction(t)
+            conn.execute(table.insert(), sanitized)
+            print(f"Inserted txn on {sanitized['txn_datetime']} amount={sanitized['amount']}")
+
+
+def analyze_pdf(pdf_path: str, page_number: int = 1, password: str = None):
+
+    if not os.path.exists(pdf_path):
+        print(f"Error: PDF file not found at {pdf_path}")
+        return
+
+    with pdfplumber.open(pdf_path, password = password) as pdf:
+        if page_number == 'all':
+            pages_to_process = list(range(len(pdf.pages)))
+        else:
+            idx = page_number - 1
+            if idx < 0 or idx >= len(pdf.pages):
+                print(f"Invalid page number {page_number}")
+                return
+            pages_to_process = [idx]
+
+        all_transactions = []
+        current_txn = None
+
+        for page_idx in pages_to_process:
+            page = pdf.pages[page_idx]
+            print(f"=== Processing Page {page_idx + 1} ===")
+
+            column_map = None
+            grouped_rows_words = group_words_by_row(page)
+            for row_words in grouped_rows_words:
+                merged_blocks = separate_columns_from_row(row_words, column_break_tolerance=5)
+                row_texts = [blk['text'] for blk in merged_blocks]
+
+                if any(is_header_or_footer(t) for t in row_texts):
+                    continue
+
+                if is_probable_header(row_texts):
+                    # print(">>> HEADER DETECTED: ", row_texts)
+                    column_map = extract_header_column_position(merged_blocks)
+                    # print(">>> COLUMN MAP BUILT:")
+                    # print(column_map)
+                    continue
+
+                if column_map is None:
+                    continue
+
+                row_data = map_row_to_columns(merged_blocks, column_map)
+                row_data = {k: (v.strip() if isinstance(v, str) else v) for k, v in row_data.items()}
+                # print(row_data)
+
+                date_value = row_data.get("date", "")
+                if date_value and is_date_row(date_value):
+                    if current_txn:
+                        all_transactions.append(current_txn)
+
+                    # Start new transaction fresh
+                    current_txn = {
+                        "date": row_data.get("date", ""),
+                        "transaction_details": row_data.get("transaction_details", ""),
+                        "type": row_data.get("type", ""),
+                        "amount": row_data.get("amount", "")
+                    }
+                else:
+                    if current_txn is None:
+                        continue
+
+                    if row_data.get("date"):
+                        current_txn["date"] += " " + row_data["date"]
+                    if row_data.get("transaction_details"):
+                        current_txn["transaction_details"] += '\n' + row_data["transaction_details"]
+
+                    if row_data.get("type"):
+                        current_txn["type"] = row_data["type"]
+
+                    if row_data.get("amount"):
+                        current_txn["amount"] += " " + row_data["amount"]
+
+        if current_txn:
+            all_transactions.append(current_txn)
+
+        insert_transactions(engine, phone_pay_transactions, all_transactions)
+        print("\n================ ALL TRANSACTIONS ================", len(all_transactions))
+        # for t in all_transactions:
+        #     print(t)
+
+
+if __name__ == "__main__":
+    paths = load_paths_config()
+    pdf_path = paths.get("phone_pay_stmt")
+    password = load_pdf_passwords().get("phone_pay")
+
+    TARGET_PAGE = 'all'
+
+    analyze_pdf(pdf_path, page_number=TARGET_PAGE, password=password)
